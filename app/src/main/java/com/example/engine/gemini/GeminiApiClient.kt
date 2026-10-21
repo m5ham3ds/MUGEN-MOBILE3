@@ -5,14 +5,19 @@ import com.example.engine.BalancingConfig
 import com.example.engine.CharacterStatInput
 import com.example.engine.RosterBalancingEngine
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
+import org.json.JSONException
 import org.json.JSONObject
 import java.io.IOException
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
 
 /**
@@ -51,9 +56,10 @@ data class GeminiCharacterProposal(
  * 1. Target model: "gemini-3.8-flash"
  * 2. Header-based authentication (`x-goog-api-key`) - API key is never placed in the URL
  * 3. Never logging API keys, authorization headers, or sensitive request contents
- * 4. Structured JSON responses via responseSchema
+ * 4. Structured JSON responses via official camelCase responseSchema and responseMimeType
  * 5. Strict local validation and bounding of all returned values
- * 6. Explicit timeouts and cancellation support
+ * 6. Explicit resilient timeouts (20s connect, 60s read) and limited exponential backoff
+ * 7. Precise error distinction (timeout vs network vs auth vs quota vs 400 Bad Request vs JSON parsing)
  */
 object GeminiApiClient {
 
@@ -65,11 +71,43 @@ object GeminiApiClient {
 
     private val httpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
-            .retryOnConnectionFailure(false)
+            .retryOnConnectionFailure(true)
             .build()
+    }
+
+    /**
+     * Sanitizes any sensitive key strings from error messages or logs.
+     */
+    fun sanitizeErrorMessage(message: String?, keyToMask: String? = null): String {
+        if (message.isNullOrBlank()) return "Unknown error"
+        var sanitized = message
+        if (!keyToMask.isNullOrBlank()) {
+            sanitized = sanitized.replace(keyToMask, "[REDACTED_API_KEY]")
+        }
+        // Match generic AIza Google API key pattern
+        sanitized = sanitized.replace(Regex("AIza[0-9A-Za-z\\-_]{35}"), "[REDACTED_API_KEY]")
+        return sanitized.take(300)
+    }
+
+    /**
+     * Extracts a user-friendly error message from Google API JSON error response without leaking secrets.
+     */
+    private fun extractServerError(responseBody: String, statusCode: Int, apiKey: String): String {
+        return try {
+            val root = JSONObject(responseBody)
+            val errorObj = root.optJSONObject("error")
+            val rawMsg = errorObj?.optString("message") ?: ""
+            if (rawMsg.isNotBlank()) {
+                sanitizeErrorMessage(rawMsg, apiKey)
+            } else {
+                "رمز الحالة HTTP $statusCode"
+            }
+        } catch (_: Exception) {
+            "رمز الحالة HTTP $statusCode"
+        }
     }
 
     /**
@@ -126,17 +164,18 @@ object GeminiApiClient {
                         )
                     }
                     400 -> {
-                        Log.w(TAG, "Gemini API 400 Bad Request")
+                        val serverMsg = extractServerError(bodyStr, code, trimmedKey)
+                        Log.w(TAG, "Gemini testConnection 400: $serverMsg")
                         GeminiResult.Error(
                             code = 400,
-                            message = "طلب غير صالح (Bad Request). تأكد من معلمات النموذج."
+                            message = "طلب غير صالح (400 Bad Request): $serverMsg"
                         )
                     }
                     401, 403 -> {
                         Log.w(TAG, "Gemini API Auth Failure ($code)")
                         GeminiResult.Error(
                             code = code,
-                            message = "مفتاح Gemini غير صالح أو غير مصرح له بالوصول للنموذج (API Key Invalid/Unauthorized).",
+                            message = "مفتاح Gemini غير صالح أو غير مصرح له بالوصول للنموذج (401/403 Unauthorized).",
                             isAuthError = true
                         )
                     }
@@ -144,7 +183,7 @@ object GeminiApiClient {
                         Log.w(TAG, "Gemini API Quota Exceeded (429)")
                         GeminiResult.Error(
                             code = 429,
-                            message = "تم تجاوز حصة الاستخدام أو حد الطلبات لحسابك لدى Google (Quota/Rate Limit Exceeded).",
+                            message = "تم تجاوز حصة الاستخدام أو حد الطلبات لحسابك لدى Google (429 Quota Exceeded).",
                             isQuotaError = true
                         )
                     }
@@ -156,31 +195,51 @@ object GeminiApiClient {
                         )
                     }
                     else -> {
+                        val serverMsg = extractServerError(bodyStr, code, trimmedKey)
                         Log.w(TAG, "Gemini API Unexpected Response ($code)")
                         GeminiResult.Error(
                             code = code,
-                            message = "استجابة غير متوقعة من خادم Gemini ($code)."
+                            message = "استجابة غير متوقعة من خادم Gemini ($code): $serverMsg"
                         )
                     }
                 }
             }
+        } catch (e: SocketTimeoutException) {
+            Log.e(TAG, "Socket timeout in testConnection: ${e.message}")
+            GeminiResult.Error(
+                code = -3,
+                message = "انتهت مهلة انتظار الاتصال بخادم Gemini (Connection Timeout)."
+            )
+        } catch (e: UnknownHostException) {
+            Log.e(TAG, "UnknownHostException in testConnection: ${e.message}")
+            GeminiResult.Error(
+                code = -4,
+                message = "تعذر الوصول إلى خوادم Google: تأكد من اتصال الجهاز بالإنترنت."
+            )
+        } catch (e: ConnectException) {
+            Log.e(TAG, "ConnectException in testConnection: ${e.message}")
+            GeminiResult.Error(
+                code = -5,
+                message = "تعذر إنشاء اتصال بخوادم Google Gemini."
+            )
         } catch (e: IOException) {
-            Log.e(TAG, "Network connection error: ${e.message}")
+            Log.e(TAG, "Network connection error in testConnection: ${e.message}")
             GeminiResult.Error(
                 code = -1,
-                message = "تعذر الاتصال بالشبكة: يرجى التحقق من اتصال الإنترنت والمحاولة لاحقاً."
+                message = "تعذر الاتصال بالشبكة: ${sanitizeErrorMessage(e.message, trimmedKey)}"
             )
         } catch (e: Exception) {
             Log.e(TAG, "Unexpected error in testConnection: ${e.message}")
             GeminiResult.Error(
                 code = -2,
-                message = "حدث خطأ غير متوقع أثناء اختبار الاتصال: ${e.localizedMessage ?: "Unknown"}"
+                message = "حدث خطأ غير متوقع أثناء اختبار الاتصال: ${sanitizeErrorMessage(e.localizedMessage, trimmedKey)}"
             )
         }
     }
 
     /**
      * Requests intelligent roster balance proposals from Gemini using structured JSON output.
+     * Implements limited single retry with exponential backoff for transient errors.
      */
     suspend fun analyzeRosterWithGemini(
         apiKey: String,
@@ -229,7 +288,7 @@ object GeminiApiClient {
             - اكتب شرحاً تفسيرياً واضحاً باللغة العربية لكل شخصية يوضح سبب التعديل ونوعية المقاتل.
         """.trimIndent()
 
-        // Structured Schema definition for Gemini
+        // Structured Schema definition for Gemini REST API (v1beta) using standard camelCase
         val schemaObj = JSONObject().apply {
             put("type", "ARRAY")
             val itemsObj = JSONObject().apply {
@@ -270,8 +329,8 @@ object GeminiApiClient {
             })
 
             put("generationConfig", JSONObject().apply {
-                put("response_mime_type", "application/json")
-                put("response_schema", schemaObj)
+                put("responseMimeType", "application/json")
+                put("responseSchema", schemaObj)
                 put("temperature", 0.2)
             })
         }
@@ -283,75 +342,203 @@ object GeminiApiClient {
             .post(requestBodyJson.toString().toRequestBody(JSON_MEDIA_TYPE))
             .build()
 
-        try {
-            httpClient.newCall(request).execute().use { response ->
-                val code = response.code
-                val responseBody = response.body?.string() ?: ""
+        // Perform call with at most 1 retry for transient network/server issues
+        var attempts = 0
+        val maxAttempts = 2
+        var lastError: GeminiResult.Error? = null
 
-                if (code != 200) {
-                    val errorMsg = when (code) {
-                        401, 403 -> "مفتاح Gemini غير صالح أو غير مصرح له"
-                        429 -> "تم تجاوز حصة الاستخدام لحسابك لدى Google"
-                        else -> "فشل طلب تحليل Gemini ($code)"
-                    }
-                    return@withContext GeminiResult.Error(
-                        code = code,
-                        message = errorMsg,
-                        isAuthError = (code == 401 || code == 403),
-                        isQuotaError = (code == 429)
-                    )
-                }
+        while (attempts < maxAttempts) {
+            attempts++
+            try {
+                httpClient.newCall(request).execute().use { response ->
+                    val code = response.code
+                    val responseBody = response.body?.string() ?: ""
 
-                // Parse Candidates
-                val rootJson = JSONObject(responseBody)
-                val candidates = rootJson.optJSONArray("candidates")
-                if (candidates == null || candidates.length() == 0) {
-                    return@withContext GeminiResult.Error(code = 500, message = "لم يرجع النموذج أي مقترحات")
-                }
+                    if (code != 200) {
+                        val serverMsg = extractServerError(responseBody, code, trimmedKey)
+                        Log.w(TAG, "Gemini analyzeRoster error (attempt $attempts, HTTP $code): $serverMsg")
 
-                val firstCandidate = candidates.getJSONObject(0)
-                val content = firstCandidate.optJSONObject("content")
-                val parts = content?.optJSONArray("parts")
-                val textPayload = parts?.optJSONObject(0)?.optString("text") ?: ""
-
-                if (textPayload.isBlank()) {
-                    return@withContext GeminiResult.Error(code = 500, message = "استجابة نصية فارغة من النموذج")
-                }
-
-                val proposalsArray = JSONArray(textPayload)
-                val parsedList = mutableListOf<GeminiCharacterProposal>()
-
-                for (i in 0 until proposalsArray.length()) {
-                    val item = proposalsArray.getJSONObject(i)
-                    val id = item.optString("characterId").trim()
-                    val life = if (item.has("proposedLife") && !item.isNull("proposedLife")) item.optInt("proposedLife") else null
-                    val attack = if (item.has("proposedAttack") && !item.isNull("proposedAttack")) item.optInt("proposedAttack") else null
-                    val defence = if (item.has("proposedDefence") && !item.isNull("proposedDefence")) item.optInt("proposedDefence") else null
-                    val archetype = if (item.has("archetype") && !item.isNull("archetype")) item.optString("archetype") else null
-                    val rationale = item.optString("rationale", "")
-
-                    if (id.isNotEmpty()) {
-                        parsedList.add(
-                            GeminiCharacterProposal(
-                                characterId = id,
-                                proposedLife = life,
-                                proposedAttack = attack,
-                                proposedDefence = defence,
-                                archetype = archetype,
-                                rationale = rationale
+                        val resultError = when (code) {
+                            400 -> GeminiResult.Error(
+                                code = 400,
+                                message = "طلب غير صالح (400 Bad Request): $serverMsg"
                             )
+                            401, 403 -> GeminiResult.Error(
+                                code = code,
+                                message = "مفتاح Gemini غير صالح أو غير مصرح له (401/403 Unauthorized). يرجى مراجعة المفتاح في الإعدادات.",
+                                isAuthError = true
+                            )
+                            429 -> GeminiResult.Error(
+                                code = 429,
+                                message = "تم تجاوز حصة الاستخدام أو حد الطلبات لحسابك لدى Google (429 Quota Exceeded).",
+                                isQuotaError = true
+                            )
+                            500, 503 -> GeminiResult.Error(
+                                code = code,
+                                message = "خوادم Google Gemini تواجه ضغطاً أو غير متاحة مؤقتاً ($code)."
+                            )
+                            else -> GeminiResult.Error(
+                                code = code,
+                                message = "استجابة غير متوقعة من خادم Gemini ($code): $serverMsg"
+                            )
+                        }
+
+                        // Only retry transient 429 or 5xx once
+                        if ((code == 429 || code == 500 || code == 503) && attempts < maxAttempts) {
+                            delay(1500)
+                            lastError = resultError
+                            return@use
+                        }
+                        return@withContext resultError
+                    }
+
+                    // Parse Candidates safely
+                    val rootJson = JSONObject(responseBody)
+                    val candidates = rootJson.optJSONArray("candidates")
+                    if (candidates == null || candidates.length() == 0) {
+                        return@withContext GeminiResult.Error(code = 500, message = "لم يرجع النموذج أي مقترحات (Empty Candidates)")
+                    }
+
+                    val firstCandidate = candidates.getJSONObject(0)
+                    val finishReason = firstCandidate.optString("finishReason", "")
+                    if (finishReason == "SAFETY") {
+                        return@withContext GeminiResult.Error(
+                            code = -7,
+                            message = "تم حجب الاستجابة بواسطة فلاتر الأمان لنموذج Gemini."
                         )
                     }
-                }
 
-                GeminiResult.Success(parsedList, DEFAULT_MODEL)
+                    val content = firstCandidate.optJSONObject("content")
+                    val parts = content?.optJSONArray("parts")
+                    if (parts == null || parts.length() == 0) {
+                        return@withContext GeminiResult.Error(code = 500, message = "استجابة خالية من الأجزاء (No Content Parts)")
+                    }
+
+                    // Scan parts for the primary text payload (skipping thinking parts if present)
+                    var textPayload = ""
+                    for (p in 0 until parts.length()) {
+                        val partObj = parts.optJSONObject(p) ?: continue
+                        if (partObj.optBoolean("thought", false)) continue
+                        val text = partObj.optString("text", "")
+                        if (text.isNotBlank()) {
+                            textPayload = text
+                            break
+                        }
+                    }
+
+                    if (textPayload.isBlank()) {
+                        // Fallback to first part text if thought filtering was not matched
+                        textPayload = parts.optJSONObject(0)?.optString("text") ?: ""
+                    }
+
+                    if (textPayload.isBlank()) {
+                        return@withContext GeminiResult.Error(code = 500, message = "استجابة نصية فارغة من نموذج Gemini")
+                    }
+
+                    // Strip any accidental markdown formatting fences
+                    val cleanJsonStr = textPayload.trim()
+                        .removePrefix("```json")
+                        .removePrefix("```JSON")
+                        .removePrefix("```")
+                        .removeSuffix("```")
+                        .trim()
+
+                    // Parse JSON Array or Object wrapping array
+                    val proposalsArray = try {
+                        if (cleanJsonStr.startsWith("[")) {
+                            JSONArray(cleanJsonStr)
+                        } else if (cleanJsonStr.startsWith("{")) {
+                            val wrapper = JSONObject(cleanJsonStr)
+                            wrapper.optJSONArray("proposals")
+                                ?: wrapper.optJSONArray("characters")
+                                ?: wrapper.optJSONArray("items")
+                                ?: throw JSONException("JSON object does not contain proposals array")
+                        } else {
+                            throw JSONException("Text payload does not start with JSON delimiter")
+                        }
+                    } catch (e: JSONException) {
+                        Log.e(TAG, "Failed to parse proposals JSON: ${e.message}")
+                        return@withContext GeminiResult.Error(
+                            code = -6,
+                            message = "خطأ في بنية استجابة النموذج (JSON Parse Error): تعذر قراءة بيانات مقترحات الشخصيات من الاستجابة."
+                        )
+                    }
+
+                    val parsedList = mutableListOf<GeminiCharacterProposal>()
+
+                    for (i in 0 until proposalsArray.length()) {
+                        val item = proposalsArray.getJSONObject(i)
+                        val id = item.optString("characterId").trim()
+                        val life = if (item.has("proposedLife") && !item.isNull("proposedLife")) item.optInt("proposedLife") else null
+                        val attack = if (item.has("proposedAttack") && !item.isNull("proposedAttack")) item.optInt("proposedAttack") else null
+                        val defence = if (item.has("proposedDefence") && !item.isNull("proposedDefence")) item.optInt("proposedDefence") else null
+                        val archetype = if (item.has("archetype") && !item.isNull("archetype")) item.optString("archetype") else null
+                        val rationale = item.optString("rationale", "")
+
+                        if (id.isNotEmpty()) {
+                            parsedList.add(
+                                GeminiCharacterProposal(
+                                    characterId = id,
+                                    proposedLife = life,
+                                    proposedAttack = attack,
+                                    proposedDefence = defence,
+                                    archetype = archetype,
+                                    rationale = rationale
+                                )
+                            )
+                        }
+                    }
+
+                    return@withContext GeminiResult.Success(parsedList, DEFAULT_MODEL)
+                }
+            } catch (e: SocketTimeoutException) {
+                Log.e(TAG, "SocketTimeoutException (attempt $attempts): ${e.message}")
+                val err = GeminiResult.Error(
+                    code = -3,
+                    message = "انتهت مهلة انتظار استجابة خادم Gemini (Request Timeout - استغرقت العملية وقتاً أطول من المتوقع)."
+                )
+                if (attempts < maxAttempts) {
+                    delay(1500)
+                    lastError = err
+                } else {
+                    return@withContext err
+                }
+            } catch (e: UnknownHostException) {
+                Log.e(TAG, "UnknownHostException: ${e.message}")
+                return@withContext GeminiResult.Error(
+                    code = -4,
+                    message = "تعذر الوصول إلى خوادم Google: تأكد من اتصال الجهاز بالإنترنت."
+                )
+            } catch (e: ConnectException) {
+                Log.e(TAG, "ConnectException: ${e.message}")
+                return@withContext GeminiResult.Error(
+                    code = -5,
+                    message = "تعذر إنشاء اتصال بخوادم Google Gemini."
+                )
+            } catch (e: IOException) {
+                Log.e(TAG, "Network failure in analyzeRosterWithGemini: ${e.message}")
+                val err = GeminiResult.Error(
+                    code = -1,
+                    message = "خطأ في اتصال الشبكة أثناء تحليل القائمة: ${sanitizeErrorMessage(e.localizedMessage, trimmedKey)}"
+                )
+                if (attempts < maxAttempts) {
+                    delay(1500)
+                    lastError = err
+                } else {
+                    return@withContext err
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Exception in analyzeRosterWithGemini: ${e.message}", e)
+                return@withContext GeminiResult.Error(
+                    code = -2,
+                    message = "خطأ أثناء معالجة استجابة الذكاء الاصطناعي: ${sanitizeErrorMessage(e.localizedMessage, trimmedKey)}"
+                )
             }
-        } catch (e: IOException) {
-            Log.e(TAG, "Network failure in analyzeRosterWithGemini: ${e.message}")
-            GeminiResult.Error(code = -1, message = "تعذر الاتصال بالشبكة لتحليل القائمة بواسطة Gemini")
-        } catch (e: Exception) {
-            Log.e(TAG, "Exception parsing Gemini response: ${e.message}", e)
-            GeminiResult.Error(code = -2, message = "خطأ أثناء معالجة استجابة الذكاء الاصطناعي: ${e.message}")
         }
+
+        return@withContext lastError ?: GeminiResult.Error(
+            code = -1,
+            message = "تعذر إتمام طلب تحليل القائمة بواسطة Gemini بعد إعادة المحاولة."
+        )
     }
 }

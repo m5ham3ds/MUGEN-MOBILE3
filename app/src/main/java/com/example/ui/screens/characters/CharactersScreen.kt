@@ -213,55 +213,123 @@ fun CharactersScreen(hasPermission: Boolean) {
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)),
                 shape = RoundedCornerShape(10.dp)
             ) {
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                        .padding(12.dp)
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "المسار: $charsDirPath",
-                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                    // Top Row: Path display & Compact Action Buttons
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
                         Row(
-                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            modifier = Modifier.weight(1f),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = "مكتشفة: ${characters.size} ($validCharactersCount صالحة)",
-                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
-                                color = MaterialTheme.colorScheme.primary
+                            Icon(
+                                Icons.Default.Folder,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.primary
                             )
+                            Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = "مسجلة بالمحرك (select.def): $registeredInEngineCount",
-                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
-                                color = if (registeredInEngineCount >= validCharactersCount) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error
+                                text = "المسار: $charsDirPath",
+                                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace, fontSize = 10.sp),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
+                        }
+
+                        Spacer(modifier = Modifier.width(8.dp))
+
+                        // Compact Action Buttons Row
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            FilledTonalIconButton(
+                                onClick = { showRosterBalancingDialog = true },
+                                modifier = Modifier.size(36.dp),
+                                colors = IconButtonDefaults.filledTonalIconButtonColors(
+                                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            ) {
+                                Icon(Icons.Default.AutoAwesome, contentDescription = "موازنة وتناغم القائمة", modifier = Modifier.size(18.dp))
+                            }
+                            FilledTonalIconButton(
+                                onClick = { showBatchRestoreDialog = true },
+                                modifier = Modifier.size(36.dp),
+                                colors = IconButtonDefaults.filledTonalIconButtonColors(
+                                    containerColor = Color(0xFF2E7D32).copy(alpha = 0.15f),
+                                    contentColor = Color(0xFF2E7D32)
+                                )
+                            ) {
+                                Icon(Icons.Default.Security, contentDescription = "خزينة الأصول المحمية", modifier = Modifier.size(18.dp))
+                            }
+                            FilledTonalIconButton(
+                                onClick = {
+                                    scope.launch {
+                                        reloadData()
+                                        Toast.makeText(context, "تمت مزامنة $registeredInEngineCount شخصيات مع select.def", Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                                modifier = Modifier.size(36.dp),
+                                colors = IconButtonDefaults.filledTonalIconButtonColors(
+                                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                    contentColor = MaterialTheme.colorScheme.primary
+                                )
+                            ) {
+                                Icon(Icons.Default.Sync, contentDescription = "Sync", modifier = Modifier.size(18.dp))
+                            }
+                            FilledTonalIconButton(
+                                onClick = { scope.launch { reloadData() } },
+                                modifier = Modifier.size(36.dp),
+                                colors = IconButtonDefaults.filledTonalIconButtonColors(
+                                    containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                    contentColor = MaterialTheme.colorScheme.primary
+                                )
+                            ) {
+                                Icon(Icons.Default.Refresh, contentDescription = "Refresh", modifier = Modifier.size(18.dp))
+                            }
                         }
                     }
 
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = { showRosterBalancingDialog = true }) {
-                            Icon(Icons.Default.AutoAwesome, contentDescription = "موازنة وتناغم القائمة", tint = MaterialTheme.colorScheme.primary)
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Bottom Row: Stats Chips using FlowRow to adapt flexibly to mobile screen widths
+                    @OptIn(ExperimentalLayoutApi::class)
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                            shape = RoundedCornerShape(6.dp)
+                        ) {
+                            Text(
+                                text = "مكتشفة: ${characters.size} ($validCharactersCount صالحة)",
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.primary
+                            )
                         }
-                        IconButton(onClick = { showBatchRestoreDialog = true }) {
-                            Icon(Icons.Default.Security, contentDescription = "خزينة الأصول المحمية", tint = Color(0xFF2E7D32))
-                        }
-                        IconButton(onClick = {
-                            scope.launch {
-                                reloadData()
-                                Toast.makeText(context, "تمت مزامنة $registeredInEngineCount شخصيات مع select.def", Toast.LENGTH_SHORT).show()
-                            }
-                        }) {
-                            Icon(Icons.Default.Sync, contentDescription = "Sync", tint = MaterialTheme.colorScheme.primary)
-                        }
-                        IconButton(onClick = { scope.launch { reloadData() } }) {
-                            Icon(Icons.Default.Refresh, contentDescription = "Refresh", tint = MaterialTheme.colorScheme.primary)
+
+                        Surface(
+                            color = if (registeredInEngineCount >= validCharactersCount) Color(0xFF2E7D32).copy(alpha = 0.12f) else MaterialTheme.colorScheme.error.copy(alpha = 0.12f),
+                            shape = RoundedCornerShape(6.dp)
+                        ) {
+                            Text(
+                                text = "مسجلة بالمحرك (select.def): $registeredInEngineCount",
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                color = if (registeredInEngineCount >= validCharactersCount) Color(0xFF2E7D32) else MaterialTheme.colorScheme.error
+                            )
                         }
                     }
                 }

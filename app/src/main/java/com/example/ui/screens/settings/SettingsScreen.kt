@@ -503,7 +503,7 @@ fun SettingsScreen(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Column {
+                            Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = "المفتاح المحفوظ المشفر:",
                                     style = MaterialTheme.typography.labelSmall,
@@ -515,6 +515,7 @@ fun SettingsScreen(
                                     color = MaterialTheme.colorScheme.primary
                                 )
                             }
+                            Spacer(modifier = Modifier.width(8.dp))
                             FilledTonalButton(
                                 onClick = {
                                     GeminiKeyStoreManager.deleteApiKey(context)

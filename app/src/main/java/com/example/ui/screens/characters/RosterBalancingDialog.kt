@@ -227,11 +227,33 @@ fun RosterBalancingDialog(
                 }
 
                 if (aiErrorMessage != null) {
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "ملاحظة: $aiErrorMessage (تم استخدام المقترحات الرياضية)",
-                        style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.error, fontSize = 11.sp)
-                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Surface(
+                        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.Info,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "ملاحظة: $aiErrorMessage — تم اعتماد المقترحات الرياضية المحلية كبديل آمن.",
+                                style = MaterialTheme.typography.bodySmall.copy(
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                    fontSize = 11.sp,
+                                    lineHeight = 15.sp
+                                )
+                            )
+                        }
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
@@ -311,10 +333,12 @@ fun RosterBalancingDialog(
 
                                     Spacer(modifier = Modifier.height(6.dp))
 
-                                    // Stats diffs
-                                    Row(
+                                    // Stats diffs: FlowRow to prevent cramped letter-by-letter wrapping on mobile
+                                    @OptIn(ExperimentalLayoutApi::class)
+                                    FlowRow(
                                         modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
                                         proposal.originalLife?.let { orig ->
                                             val prop = proposal.proposedLife ?: orig
@@ -453,12 +477,12 @@ fun RosterBalancingDialog(
                     ) {
                         if (isApplyingChanges) {
                             CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Color.White)
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("جارٍ التطبيق الذري...")
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("جارٍ التطبيق...", maxLines = 1)
                         } else {
                             Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("تطبيق الموازنة المحددة ($selectedCount)")
+                            Text("تطبيق الموازنة ($selectedCount)", maxLines = 1)
                         }
                     }
                 }
@@ -472,28 +496,32 @@ private fun StatBadge(name: String, orig: Int, prop: Int, unit: String) {
     val delta = prop - orig
     val isChanged = delta != 0
     Surface(
-        color = if (isChanged) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent,
+        color = if (isChanged) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
         shape = RoundedCornerShape(4.dp)
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
                 text = "$name: $orig$unit",
-                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp)
+                style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                maxLines = 1
             )
             if (isChanged) {
                 Text(
                     text = " → $prop$unit",
-                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 10.sp, color = MaterialTheme.colorScheme.primary)
+                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, fontSize = 10.sp, color = MaterialTheme.colorScheme.primary),
+                    maxLines = 1
                 )
                 Text(
                     text = if (delta > 0) " (+${delta}$unit)" else " (${delta}$unit)",
                     style = MaterialTheme.typography.labelSmall.copy(
                         fontSize = 9.sp,
+                        fontWeight = FontWeight.SemiBold,
                         color = if (delta > 0) Color(0xFF2E7D32) else Color(0xFFC62828)
-                    )
+                    ),
+                    maxLines = 1
                 )
             }
         }

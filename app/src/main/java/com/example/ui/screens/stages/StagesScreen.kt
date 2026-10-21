@@ -2,7 +2,9 @@ package com.example.ui.screens.stages
 
 import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -118,7 +120,7 @@ fun StagesScreen(hasPermission: Boolean) {
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = "المراحل المكتشفة ($totalCount)",
                             style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)
@@ -129,6 +131,8 @@ fun StagesScreen(hasPermission: Boolean) {
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
+
+                    Spacer(modifier = Modifier.width(12.dp))
 
                     Button(
                         onClick = {
@@ -174,9 +178,11 @@ fun StagesScreen(hasPermission: Boolean) {
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // Filter chips
+                // Horizontally scrollable filter chips to prevent cramped overflowing on mobile
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     StageFilter.values().forEach { filter ->
@@ -208,7 +214,9 @@ fun StagesScreen(hasPermission: Boolean) {
             ) {
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.padding(32.dp)
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(24.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.Map,
@@ -233,7 +241,7 @@ fun StagesScreen(hasPermission: Boolean) {
             }
         } else {
             LazyVerticalGrid(
-                columns = GridCells.Adaptive(minSize = 280.dp),
+                columns = GridCells.Adaptive(minSize = 240.dp),
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth(),
@@ -279,7 +287,7 @@ fun StageCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(140.dp)
-                    .background(Color.Black)
+                    .background(Color(0xFF1E1E24))
             ) {
                 if (stage.imageUri != null) {
                     AsyncImage(
@@ -289,15 +297,26 @@ fun StageCard(
                         modifier = Modifier.fillMaxSize()
                     )
                 } else {
-                    Box(
-                        modifier = Modifier.fillMaxSize(),
-                        contentAlignment = Alignment.Center
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Image,
+                            imageVector = Icons.Default.Map,
                             contentDescription = null,
-                            modifier = Modifier.size(48.dp),
-                            tint = Color.White.copy(alpha = 0.4f)
+                            modifier = Modifier.size(44.dp),
+                            tint = Color.White.copy(alpha = 0.45f)
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = stage.displayName,
+                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+                            color = Color.White.copy(alpha = 0.7f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }

@@ -234,4 +234,24 @@ class GeminiIntegrationTest {
             tempDir.deleteRecursively()
         }
     }
+
+    @Test
+    fun testSanitizeErrorMessageRedactsKeys() {
+        val rawSecret = "AIzaSyD1234567890abcdefghijklmnopqrstuv"
+        val rawMessage = "Invalid request containing secret $rawSecret in header"
+        val sanitized = com.example.engine.gemini.GeminiApiClient.sanitizeErrorMessage(rawMessage, rawSecret)
+
+        assertFalse("Sanitized message must not contain raw secret", sanitized.contains(rawSecret))
+        assertTrue("Sanitized message must contain redaction placeholder", sanitized.contains("[REDACTED_API_KEY]"))
+    }
+
+    @Test
+    fun testEmptyKeyValidation() = runBlocking {
+        val result = com.example.engine.gemini.GeminiApiClient.testConnection("")
+        assertTrue("Must be an error result", result is com.example.engine.gemini.GeminiResult.Error)
+        val error = result as com.example.engine.gemini.GeminiResult.Error
+        assertEquals(400, error.code)
+        assertTrue(error.isAuthError)
+        assertTrue(error.message.contains("لم يتم إدخال مفتاح"))
+    }
 }
