@@ -1208,52 +1208,97 @@ object CharacterWorkspaceManager {
     }
 
     /** Validate an untrusted manifest path and ensure it resolves beneath root. */
-    private fun resolveSafeRelativeFile(root: File, relativePath: String): File? {
+    fun resolveSafeRelativeFile(root: File, relativePath: String): File? {
         if (relativePath.isBlank() || relativePath.startsWith('/') || relativePath.startsWith('\\')) return null
         val normalized = relativePath.replace('\\', '/')
         val segments = normalized.split('/')
         if (segments.any { it.isBlank() || it == "." || it == ".." }) return null
-        val target = File(root, normalized)
         val rootCanonical = try { root.canonicalFile } catch (_: Exception) { return null }
+        val rootCanonicalPath = rootCanonical.path.trimEnd(File.separatorChar)
+        val target = File(rootCanonical, normalized)
         val targetCanonical = try { target.canonicalFile } catch (_: Exception) { return null }
-        return if (targetCanonical.path.startsWith(rootCanonical.path + File.separator)) targetCanonical else null
+        val targetCanonicalPath = targetCanonical.path
+        return if (targetCanonicalPath != rootCanonicalPath && targetCanonicalPath.startsWith(rootCanonicalPath + File.separator)) {
+            targetCanonical
+        } else {
+            null
+        }
     }
 
     private fun fileHashMap(root: File): Map<String, String> {
         if (!root.exists()) return emptyMap()
         require(root.isDirectory) { "Expected directory: ${root.absolutePath}" }
+        val canonicalRoot = try { root.canonicalFile } catch (e: Exception) {
+            throw java.io.IOException("Cannot canonicalize directory root: ${e.message}")
+        }
+        val canonicalRootPath = canonicalRoot.path.trimEnd(File.separatorChar)
         val result = linkedMapOf<String, String>()
+
         fun visit(dir: File) {
             val children = dir.listFiles() ?: throw java.io.IOException("Cannot list directory: ${dir.absolutePath}")
-            for (child in children) {
-                val safe = resolveSafeRelativeFile(root, child.relativeTo(root).path)
-                    ?: throw java.io.IOException("Unsafe path encountered: ${child.absolutePath}")
-                if (safe.isDirectory) visit(safe)
-                else if (safe.isFile) result[safe.relativeTo(root.canonicalFile).path] = calculateSha256(safe)
-                else throw java.io.IOException("Unsupported filesystem entry: ${safe.absolutePath}")
+            for (child in children.sortedBy { it.name }) {
+                val canonicalChild = try { child.canonicalFile } catch (e: Exception) {
+                    throw java.io.IOException("Cannot canonicalize path entry: ${e.message}")
+                }
+                val childPath = canonicalChild.path
+                if (childPath == canonicalRootPath || !childPath.startsWith(canonicalRootPath + File.separator)) {
+                    throw java.io.IOException("Unsafe path encountered: ${child.absolutePath}")
+                }
+                val relPath = childPath.substring(canonicalRootPath.length + 1).replace('\\', '/')
+                val segments = relPath.split('/')
+                if (segments.any { it.isBlank() || it == "." || it == ".." }) {
+                    throw java.io.IOException("Unsafe path encountered: ${child.absolutePath}")
+                }
+
+                if (canonicalChild.isDirectory) {
+                    visit(canonicalChild)
+                } else if (canonicalChild.isFile) {
+                    result[relPath] = calculateSha256(canonicalChild)
+                } else {
+                    throw java.io.IOException("Unsupported filesystem entry: ${canonicalChild.absolutePath}")
+                }
             }
         }
-        visit(root.canonicalFile)
+
+        visit(canonicalRoot)
         return result
     }
 
     private fun copyDirectoryContents(source: File, destination: File) {
         if (!source.exists() || !source.isDirectory) throw java.io.IOException("Source directory missing: ${source.absolutePath}")
-        if (!destination.exists() && !destination.mkdirs()) throw java.io.IOException("Cannot create directory: ${destination.absolutePath}")
         val sourceCanonical = source.canonicalFile
+        val destCanonical = destination.canonicalFile
+        if (!destCanonical.exists() && !destCanonical.mkdirs()) throw java.io.IOException("Cannot create directory: ${destination.absolutePath}")
+        val sourceRootPath = sourceCanonical.path.trimEnd(File.separatorChar)
+        val destRootPath = destCanonical.path.trimEnd(File.separatorChar)
+
         val children = sourceCanonical.listFiles() ?: throw java.io.IOException("Cannot list directory: ${source.absolutePath}")
-        for (child in children) {
-            val safeSource = resolveSafeRelativeFile(sourceCanonical, child.relativeTo(sourceCanonical).path)
-                ?: throw java.io.IOException("Unsafe source path: ${child.absolutePath}")
-            val target = File(destination, safeSource.relativeTo(sourceCanonical).path)
-            if (safeSource.isDirectory) {
-                copyDirectoryContents(safeSource, target)
-            } else if (safeSource.isFile) {
-                target.parentFile?.let { if (!it.exists() && !it.mkdirs()) throw java.io.IOException("Cannot create ${it.absolutePath}") }
-                safeSource.copyTo(target, overwrite = false)
-                target.setLastModified(safeSource.lastModified())
+        for (child in children.sortedBy { it.name }) {
+            val childCanonical = try { child.canonicalFile } catch (e: Exception) {
+                throw java.io.IOException("Cannot canonicalize source child: ${e.message}")
+            }
+            val childPath = childCanonical.path
+            if (childPath == sourceRootPath || !childPath.startsWith(sourceRootPath + File.separator)) {
+                throw java.io.IOException("Unsafe source path: ${child.absolutePath}")
+            }
+            val relPath = childPath.substring(sourceRootPath.length + 1).replace('\\', '/')
+            val target = File(destCanonical, relPath)
+            val targetCanonical = try { target.canonicalFile } catch (e: Exception) {
+                throw java.io.IOException("Cannot canonicalize target: ${e.message}")
+            }
+            val targetPath = targetCanonical.path
+            if (targetPath == destRootPath || !targetPath.startsWith(destRootPath + File.separator)) {
+                throw java.io.IOException("Unsafe destination path: ${target.absolutePath}")
+            }
+
+            if (childCanonical.isDirectory) {
+                copyDirectoryContents(childCanonical, targetCanonical)
+            } else if (childCanonical.isFile) {
+                targetCanonical.parentFile?.let { if (!it.exists() && !it.mkdirs()) throw java.io.IOException("Cannot create ${it.absolutePath}") }
+                childCanonical.copyTo(targetCanonical, overwrite = false)
+                targetCanonical.setLastModified(childCanonical.lastModified())
             } else {
-                throw java.io.IOException("Unsupported filesystem entry: ${safeSource.absolutePath}")
+                throw java.io.IOException("Unsupported filesystem entry: ${childCanonical.absolutePath}")
             }
         }
     }
@@ -1861,7 +1906,12 @@ object CharacterWorkspaceManager {
         // 2. Pre-validation and preparation for defEditor
         if (defEditor != null) {
             val defFile = defEditor.defFile
-            val defRel = defFile.name
+            val defCanonical = try { defFile.canonicalFile } catch (_: Exception) { defFile }
+            val defRel = if (defCanonical.path.startsWith(workspaceCanonical + File.separator)) {
+                defCanonical.path.substring(workspaceCanonical.length + 1).replace('\\', '/')
+            } else {
+                defFile.name
+            }
             if (!defFile.isFile) {
                 return SafeSaveResult(false, null, null, "Save blocked: .def target is missing or not a regular file: ${defFile.absolutePath}")
             }
@@ -1907,7 +1957,12 @@ object CharacterWorkspaceManager {
         // 3. Pre-validation and preparation for cnsEditor
         if (cnsEditor != null) {
             val cnsFile = cnsEditor.cnsFile
-            val cnsRel = cnsFile.name
+            val cnsCanonical = try { cnsFile.canonicalFile } catch (_: Exception) { cnsFile }
+            val cnsRel = if (cnsCanonical.path.startsWith(workspaceCanonical + File.separator)) {
+                cnsCanonical.path.substring(workspaceCanonical.length + 1).replace('\\', '/')
+            } else {
+                cnsFile.name
+            }
             if (!cnsFile.isFile) {
                 return SafeSaveResult(false, null, null, "Save blocked: .cns target is missing or not a regular file: ${cnsFile.absolutePath}")
             }

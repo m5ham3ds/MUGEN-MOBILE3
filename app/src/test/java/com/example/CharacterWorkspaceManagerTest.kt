@@ -823,5 +823,182 @@ class CharacterWorkspaceManagerTest {
         val saveResult = CharacterWorkspaceManager.saveCnsChanges(editor, "ActiveWorkspaceFighter", context)
         assertTrue("Saving to workspace must NOT be blocked by attempted workspace registration", saveResult.success)
     }
+
+    @Test
+    fun testVaultEnumerationWithNestedFoldersAndActCnsFiles() {
+        val charsWorkspace = MugenMobileStorage.getCharsDir(context).apply { mkdirs() }
+        val bayonettaDir = File(charsWorkspace, "Bayonetta").apply { mkdirs() }
+        File(bayonettaDir, "Bayonetta.def").writeText(
+            """
+            [Info]
+            name = "Bayonetta"
+            displayname = "Bayonetta"
+            [Files]
+            cns = Bayonetta.cns
+            """.trimIndent()
+        )
+        File(bayonettaDir, "Bayonetta.cns").writeText("[Data]\nlife = 1000\nattack = 100\ndefence = 100")
+        
+        // Nested folder named 'files' containing .act palette
+        val nestedFilesDir = File(bayonettaDir, "files").apply { mkdirs() }
+        File(nestedFilesDir, "Bayonetta.act").writeText("PALETTE_DATA_BYTES")
+        
+        // Additional nested folder
+        val cnsSubDir = File(bayonettaDir, "cns").apply { mkdirs() }
+        File(cnsSubDir, "Config.cns").writeText("; Config file\n[Option]\ncombo = 1")
+
+        val snapResult = CharacterWorkspaceManager.capturePristineSnapshot("Bayonetta", bayonettaDir, context)
+        assertTrue("Snapshot creation must succeed for nested character", snapResult.success)
+
+        val (healthy, error) = CharacterWorkspaceManager.verifyVaultIntegrity("Bayonetta", context)
+        assertTrue("Vault integrity must be healthy: error=$error", healthy)
+        assertNull("Error should be null", error)
+
+        val manifest = CharacterWorkspaceManager.getVaultManifest("Bayonetta", context)
+        assertNotNull(manifest)
+        assertTrue("Manifest must track files/Bayonetta.act", manifest!!.files.containsKey("files/Bayonetta.act"))
+        assertTrue("Manifest must track cns/Config.cns", manifest.files.containsKey("cns/Config.cns"))
+    }
+
+    @Test
+    fun testOpeningModifiedBayonettaAndShadowWithoutUnsafePathError() {
+        val charsWorkspace = MugenMobileStorage.getCharsDir(context).apply { mkdirs() }
+        
+        // Setup Bayonetta
+        val bayonettaDir = File(charsWorkspace, "Bayonetta").apply { mkdirs() }
+        File(bayonettaDir, "Bayonetta.def").writeText("[Info]\nname = \"Bayonetta\"\n[Files]\ncns = Bayonetta.cns")
+        val bayonettaCns = File(bayonettaDir, "Bayonetta.cns").apply {
+            writeText("[Data]\nlife = 1000\nattack = 100\ndefence = 100")
+        }
+        val bayonettaFiles = File(bayonettaDir, "files").apply { mkdirs() }
+        File(bayonettaFiles, "Bayonetta.act").writeText("ACT_COLOR_TABLE")
+
+        // Setup Shadow
+        val shadowDir = File(charsWorkspace, "Shadow").apply { mkdirs() }
+        File(shadowDir, "Shadow.def").writeText("[Info]\nname = \"Shadow\"\n[Files]\ncns = Config.cns")
+        val shadowCns = File(shadowDir, "Config.cns").apply {
+            writeText("[Data]\nlife = 1000\nattack = 100\ndefence = 100")
+        }
+
+        // Apply balancing changes to both
+        val bayonettaEditor = CnsEditor(bayonettaCns, context)
+        bayonettaEditor.properties["[data]"]?.get("life")?.value = "1050"
+        val saveBayo = CharacterWorkspaceManager.saveCnsChanges(bayonettaEditor, "Bayonetta", context)
+        assertTrue("Saving Bayonetta balance change must succeed", saveBayo.success)
+
+        val shadowEditor = CnsEditor(shadowCns, context)
+        shadowEditor.properties["[data]"]?.get("attack")?.value = "110"
+        val saveShadow = CharacterWorkspaceManager.saveCnsChanges(shadowEditor, "Shadow", context)
+        assertTrue("Saving Shadow balance change must succeed", saveShadow.success)
+
+        // Query audit status for both (mimics opening character in UI / CompleteCharacterEditorDialog)
+        val auditBayo = CharacterWorkspaceManager.getCharacterAuditStatus("Bayonetta", context)
+        assertTrue("Bayonetta vault must be healthy", auditBayo.isVaultHealthy)
+        assertNull("Bayonetta vaultError must be null but was: ${auditBayo.vaultError}", auditBayo.vaultError)
+        assertEquals(CharacterWorkspaceStatus.MODIFIED, auditBayo.workspaceStatus)
+
+        val auditShadow = CharacterWorkspaceManager.getCharacterAuditStatus("Shadow", context)
+        assertTrue("Shadow vault must be healthy", auditShadow.isVaultHealthy)
+        assertNull("Shadow vaultError must be null but was: ${auditShadow.vaultError}", auditShadow.vaultError)
+        assertEquals(CharacterWorkspaceStatus.MODIFIED, auditShadow.workspaceStatus)
+    }
+
+    @Test
+    fun testResolveSafeRelativeFileAndSymlinkTraversals() {
+        val baseDir = File(context.cacheDir, "test_symlink_base_${System.nanoTime()}").apply { mkdirs() }
+        val targetFile = File(baseDir, "test.txt").apply { writeText("HELLO") }
+        val subDir = File(baseDir, "sub").apply { mkdirs() }
+        val nestedFile = File(subDir, "nested.cns").apply { writeText("NESTED") }
+
+        // Valid relative paths
+        val resolved1 = CharacterWorkspaceManager.resolveSafeRelativeFile(baseDir, "test.txt")
+        assertNotNull(resolved1)
+        assertEquals(targetFile.canonicalPath, resolved1!!.canonicalPath)
+
+        val resolvedNested = CharacterWorkspaceManager.resolveSafeRelativeFile(baseDir, "sub/nested.cns")
+        assertNotNull(resolvedNested)
+        assertEquals(nestedFile.canonicalPath, resolvedNested!!.canonicalPath)
+
+        // Path traversal attempts must be rejected
+        assertNull("Traversal with .. must be rejected", CharacterWorkspaceManager.resolveSafeRelativeFile(baseDir, "../outside.txt"))
+        assertNull("Traversal inside sub must be rejected", CharacterWorkspaceManager.resolveSafeRelativeFile(baseDir, "sub/../../outside.txt"))
+        assertNull("Absolute path must be rejected", CharacterWorkspaceManager.resolveSafeRelativeFile(baseDir, "/etc/passwd"))
+        assertNull("Blank path must be rejected", CharacterWorkspaceManager.resolveSafeRelativeFile(baseDir, "   "))
+        assertNull("Single dot segment must be rejected", CharacterWorkspaceManager.resolveSafeRelativeFile(baseDir, "./test.txt"))
+
+        // Symlink pointing to baseDir should still validate safely
+        try {
+            val symlinkDir = File(context.cacheDir, "test_symlink_link_${System.nanoTime()}")
+            java.nio.file.Files.createSymbolicLink(symlinkDir.toPath(), baseDir.toPath())
+            val resolvedViaSymlink = CharacterWorkspaceManager.resolveSafeRelativeFile(symlinkDir, "test.txt")
+            assertNotNull("Symlinked root must resolve safely", resolvedViaSymlink)
+            assertEquals(targetFile.canonicalPath, resolvedViaSymlink!!.canonicalPath)
+
+            // Traversal escaping through symlink must still be rejected
+            assertNull("Traversal via symlink root must be rejected", CharacterWorkspaceManager.resolveSafeRelativeFile(symlinkDir, "../outside.txt"))
+            symlinkDir.delete()
+        } catch (_: Exception) {
+            // Symlink creation might not be permitted on some restricted environments; non-fatal
+        }
+
+        baseDir.deleteRecursively()
+    }
+
+    @Test
+    fun testCorruptedOrMissingVaultFileHandledGracefully() {
+        val charsWorkspace = MugenMobileStorage.getCharsDir(context).apply { mkdirs() }
+        val charDir = createSampleCharacterFolder(charsWorkspace, "FragileFighter")
+        
+        CharacterWorkspaceManager.capturePristineSnapshot("FragileFighter", charDir, context)
+        val (healthyBefore, _) = CharacterWorkspaceManager.verifyVaultIntegrity("FragileFighter", context)
+        assertTrue(healthyBefore)
+
+        // Intentionally delete one file in the vault
+        val vaultFile = File(File(File(CharacterWorkspaceManager.getVaultDir(context), "FragileFighter"), "files"), "FragileFighter.cmd")
+        assertTrue(vaultFile.exists())
+        vaultFile.delete()
+
+        // Integrity check should return false cleanly without unhandled exceptions
+        val (healthyAfter, errorMsg) = CharacterWorkspaceManager.verifyVaultIntegrity("FragileFighter", context)
+        assertFalse("Vault with missing file must fail integrity check", healthyAfter)
+        assertNotNull(errorMsg)
+        assertTrue("Error message must mention missing or differing file set", errorMsg!!.contains("missing") || errorMsg.contains("differs"))
+
+        // Audit status reports error safely
+        val audit = CharacterWorkspaceManager.getCharacterAuditStatus("FragileFighter", context)
+        assertFalse(audit.isVaultHealthy)
+        assertEquals("خزينة غير صالحة", audit.statusBadgeTitle)
+    }
+
+    @Test
+    fun testRestoreCyclePreservesNestedFolders() {
+        val charsWorkspace = MugenMobileStorage.getCharsDir(context).apply { mkdirs() }
+        val charDir = File(charsWorkspace, "RestorableBayonetta").apply { mkdirs() }
+        File(charDir, "RestorableBayonetta.def").writeText("[Info]\nname = \"RestorableBayonetta\"\n[Files]\ncns = RestorableBayonetta.cns")
+        val cns = File(charDir, "RestorableBayonetta.cns").apply { writeText("[Data]\nlife = 1000\nattack = 100\ndefence = 100") }
+        val nested = File(charDir, "files").apply { mkdirs() }
+        val actFile = File(nested, "Bayonetta.act").apply { writeText("PRISTINE_ACT_DATA") }
+        val pristineActHash = CharacterWorkspaceManager.calculateSha256(actFile)
+
+        // Capture vault
+        CharacterWorkspaceManager.capturePristineSnapshot("RestorableBayonetta", charDir, context)
+
+        // Modify CNS in workspace
+        val editor = CnsEditor(cns, context)
+        editor.properties["[data]"]?.get("life")?.value = "1200"
+        CharacterWorkspaceManager.saveCnsChanges(editor, "RestorableBayonetta", context)
+        assertTrue(CharacterWorkspaceManager.isCharacterModified("RestorableBayonetta", context))
+
+        // Execute Restore
+        val restoreResult = CharacterWorkspaceManager.restoreSingleCharacter("RestorableBayonetta", context)
+        assertTrue("Restore must succeed: ${restoreResult.errorMessage}", restoreResult.success)
+
+        // Verify workspace is pristine again
+        assertFalse("Character must no longer be modified after restore", CharacterWorkspaceManager.isCharacterModified("RestorableBayonetta", context))
+        assertTrue(cns.readText().contains("life = 1000"))
+        assertTrue("Nested act file must exist after restore", actFile.exists())
+        assertEquals("Nested act file hash must match pristine snapshot", pristineActHash, CharacterWorkspaceManager.calculateSha256(actFile))
+    }
 }
+
 
